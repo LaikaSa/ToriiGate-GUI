@@ -2,6 +2,7 @@ from PySide6.QtWidgets import (QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
                               QPushButton, QTextEdit, QFileDialog, QRadioButton,
                               QButtonGroup, QCheckBox, QProgressBar, QLabel)
 from PySide6.QtCore import Qt, Signal, QThread
+import torch
 from processor import ImageProcessor
 
 class ProcessingThread(QThread):
@@ -33,10 +34,17 @@ class ProcessingThread(QThread):
             self.finished.emit(results)
 
 class MainWindow(QMainWindow):
-    def __init__(self):
+    def __init__(self, quantization_mode=None):
         super().__init__()
-        self.processor = ImageProcessor()
+        self.processor = ImageProcessor(quantization_mode)
         self.setup_ui()
+        
+        # Update status bar with quantization info
+        status_msg = f"Device: {self.processor.device} "
+        if torch.cuda.is_available():
+            status_msg += f"({torch.cuda.get_device_name(0)}) "
+        status_msg += f"| Quantization: {quantization_mode if quantization_mode else 'None'}"
+        self.statusBar().showMessage(status_msg)
         
     def setup_ui(self):
         self.setWindowTitle("ToriiGate Image Processor")

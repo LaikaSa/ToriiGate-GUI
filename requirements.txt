@@ -3,5 +3,7 @@ torch
 torchvision
 torchaudio
 transformers
+bitsandbytes
+accelerate
 Pillow
 PySide6
