@@ -1,6 +1,6 @@
 from PySide6.QtWidgets import (QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
                               QPushButton, QTextEdit, QFileDialog, QRadioButton,
-                              QButtonGroup, QCheckBox, QProgressBar, QLabel)
+                              QButtonGroup, QCheckBox, QProgressBar, QLabel, QLineEdit)
 from PySide6.QtCore import Qt, Signal, QThread
 import torch
 from processor import ImageProcessor
@@ -9,13 +9,14 @@ class ProcessingThread(QThread):
     finished = Signal(dict)
     progress = Signal(int)
     
-    def __init__(self, processor, mode, image_path, prompt_type, use_tags):
+    def __init__(self, processor, mode, image_path, prompt_type, use_tags, prefix=""):
         super().__init__()
         self.processor = processor
         self.mode = mode
         self.image_path = image_path
         self.prompt_type = prompt_type
         self.use_tags = use_tags
+        self.prefix = prefix
         
     def run(self):
         if self.mode == "single":
@@ -29,7 +30,8 @@ class ProcessingThread(QThread):
             results = self.processor.process_batch(
                 self.image_path,
                 self.prompt_type,
-                self.use_tags
+                self.use_tags,
+                self.prefix  # Add the prefix here
             )
             self.finished.emit(results)
 
@@ -84,6 +86,15 @@ class MainWindow(QMainWindow):
         # Tags option
         self.use_tags = QCheckBox("Use Tags (if available)")
         layout.addWidget(self.use_tags)
+
+        # Add prefix option
+        prefix_layout = QHBoxLayout()
+        self.prefix_label = QLabel("Caption Prefix:")
+        self.prefix_input = QLineEdit()
+        self.prefix_input.setPlaceholderText("Optional: Add prefix to all captions")
+        prefix_layout.addWidget(self.prefix_label)
+        prefix_layout.addWidget(self.prefix_input)
+        layout.addLayout(prefix_layout)
         
         # File selection
         file_layout = QHBoxLayout()
@@ -146,7 +157,8 @@ class MainWindow(QMainWindow):
             "single" if self.single_mode.isChecked() else "batch",
             path,
             self.get_prompt_type(),
-            self.use_tags.isChecked()
+            self.use_tags.isChecked(),
+            self.prefix_input.text()  # Add prefix from input
         )
         self.processing_thread.finished.connect(self.on_processing_finished)
         self.processing_thread.start()

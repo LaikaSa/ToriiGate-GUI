@@ -92,7 +92,7 @@ class ImageProcessor:
         generated_texts = self.processor.batch_decode(generated_ids, skip_special_tokens=True)
         return generated_texts[0].split('Assistant: ')[1]
 
-    def process_batch(self, folder_path, prompt_type="json", use_tags=False):
+    def process_batch(self, folder_path, prompt_type="json", use_tags=False, prefix=""):
         image_extensions = ['.jpg', '.png', '.webp', '.jpeg']
         results = {}
         
@@ -129,6 +129,11 @@ class ImageProcessor:
                     use_tags and tags is not None,  # Only use tags if they were successfully read
                     tags_path if tags is not None else None
                 )
+                
+                # Add prefix if provided
+                if prefix:
+                    caption = f"{prefix}\n{caption}"
+                    
                 results[file] = caption
                 
                 # Save caption to file
