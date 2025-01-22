@@ -1,9 +1,10 @@
-from PySide6.QtWidgets import (QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
-                              QPushButton, QTextEdit, QFileDialog, QRadioButton,
+from PySide6.QtWidgets import (QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, QComboBox,
+                              QPushButton, QTextEdit, QFileDialog, QRadioButton, QApplication,
                               QButtonGroup, QCheckBox, QProgressBar, QLabel, QLineEdit)
 from PySide6.QtCore import Qt, Signal, QThread
 import torch
 from processor import ImageProcessor
+from processor import AVAILABLE_MODELS 
 
 class ProcessingThread(QThread):
     finished = Signal(dict)
@@ -29,23 +30,25 @@ class ProcessingThread(QThread):
         else:
             results = self.processor.process_batch(
                 self.image_path,
-                self.prompt_type,
-                self.use_tags,
-                self.prefix  # Add the prefix here
+                prompt_type=self.prompt_type,
+                use_tags=self.use_tags,
+                prefix=self.prefix
             )
             self.finished.emit(results)
 
 class MainWindow(QMainWindow):
     def __init__(self, quantization_mode=None):
         super().__init__()
-        self.processor = ImageProcessor(quantization_mode)
+        self.quantization_mode = quantization_mode
+        self.processor = ImageProcessor(list(AVAILABLE_MODELS.keys())[0], quantization_mode)
         self.setup_ui()
+        self.update_status_bar()
         
-        # Update status bar with quantization info
-        status_msg = f"Device: {self.processor.device} "
+    def update_status_bar(self):
+        status_msg = f"Model: {self.model_combo.currentText()} | Device: {self.processor.device} "
         if torch.cuda.is_available():
             status_msg += f"({torch.cuda.get_device_name(0)}) "
-        status_msg += f"| Quantization: {quantization_mode if quantization_mode else 'None'}"
+        status_msg += f"| Quantization: {self.quantization_mode if self.quantization_mode else 'None'}"
         self.statusBar().showMessage(status_msg)
         
     def setup_ui(self):
@@ -55,6 +58,15 @@ class MainWindow(QMainWindow):
         central_widget = QWidget()
         self.setCentralWidget(central_widget)
         layout = QVBoxLayout(central_widget)
+        
+        # Model selection
+        model_layout = QHBoxLayout()
+        model_label = QLabel("Model:")
+        self.model_combo = QComboBox()
+        self.model_combo.addItems(AVAILABLE_MODELS.keys())
+        model_layout.addWidget(model_label)
+        model_layout.addWidget(self.model_combo)
+        layout.addLayout(model_layout)
         
         # Mode selection
         mode_layout = QHBoxLayout()
@@ -122,6 +134,40 @@ class MainWindow(QMainWindow):
         self.select_button.clicked.connect(self.select_path)
         self.process_button.clicked.connect(self.process_images)
         self.single_mode.toggled.connect(self.update_ui)
+        # Connect model change signal
+        self.model_combo.currentTextChanged.connect(self.on_model_changed)
+
+    def on_model_changed(self, model_name):
+        # Disable UI during model switch
+        self.setEnabled(False)
+        self.statusBar().showMessage("Switching model... Please wait.")
+        QApplication.processEvents()  # Update UI
+
+        try:
+            # Unload current model
+            if hasattr(self, 'processor'):
+                print("Unloading current model...")
+                self.processor.model = None
+                self.processor.processor = None
+                import gc
+                gc.collect()
+                if torch.cuda.is_available():
+                    torch.cuda.empty_cache()
+                    print(f"GPU memory cleared. Current usage: {torch.cuda.memory_allocated()/1024**3:.2f}GB")
+
+            # Initialize new model
+            print(f"Loading new model: {model_name}")
+            self.processor = ImageProcessor(model_name, self.quantization_mode)
+            self.update_status_bar()
+            print("Model switch completed successfully")
+
+        except Exception as e:
+            print(f"Error switching models: {str(e)}")
+            self.statusBar().showMessage(f"Error switching models: {str(e)}")
+
+        finally:
+            # Re-enable UI
+            self.setEnabled(True)
         
     def select_path(self):
         if self.single_mode.isChecked():
