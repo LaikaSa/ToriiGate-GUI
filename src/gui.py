@@ -194,7 +194,12 @@ class MainWindow(QMainWindow):
         path = self.path_label.text()
         if path == "No file selected":
             return
-            
+
+        if "exl2" in self.model_combo.currentText().lower():
+            self.use_tags.setText("Use Metadata Files (tags, chars, traits)")
+        else:
+            self.use_tags.setText("Use Tags (if available)")
+
         self.process_button.setEnabled(False)
         self.progress_bar.setVisible(True)
         

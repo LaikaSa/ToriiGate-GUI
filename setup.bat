@@ -1,14 +1,32 @@
 @echo off
-echo Creating virtual environment...
+setlocal
+
+:: Create and activate virtual environment
 python -m venv venv
-call venv\Scripts\activate
+call venv\Scripts\activate.bat
 
-echo Installing latest dependencies...
-pip install --upgrade pip
-pip install -r requirements.txt
+:: Upgrade pip and install build tools
+python -m pip install --upgrade pip
+pip install setuptools wheel packaging ninja cmake
 
-echo Verifying CUDA installation...
-python -c "import torch; print('PyTorch:', torch.__version__); print('CUDA available:', torch.cuda.is_available()); print('CUDA version:', torch.version.cuda if torch.cuda.is_available() else 'N/A')"
+:: Install PyTorch with CUDA 12.1 first
+pip install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cu121
 
-echo Setup complete!
+:: Install other requirements
+pip install transformers bitsandbytes accelerate Pillow PySide6 exllamav2
+
+:: Set required environment variables
+set TORCH_CUDA_ARCH_LIST=8.0;8.6;8.9;9.0
+set MAX_JOBS=4
+
+:: Install Flash Attention without custom flags
+pip install flash-attn ^
+    --no-cache-dir ^
+    --no-build-isolation
+
+:: Build ExLlamaV2 kernels
+python -c "from exllamav2 import ExLlamaV2"
+
+echo Installation complete!
+echo To activate venv later: venv\Scripts\activate.bat
 pause
