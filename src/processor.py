@@ -12,6 +12,7 @@ from exllamav2 import (
 )
 from exllamav2.generator import ExLlamaV2Sampler
 from exllamav2.generator import ExLlamaV2DynamicGenerator
+from transformers.image_utils import load_image
 from collections import OrderedDict
 
 AVAILABLE_MODELS = {
