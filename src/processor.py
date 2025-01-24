@@ -13,14 +13,12 @@ from exllamav2 import (
 from exllamav2.generator import ExLlamaV2Sampler
 from exllamav2.generator import ExLlamaV2DynamicGenerator
 from transformers.image_utils import load_image
-from collections import OrderedDict
+import gc
+import time
 
 AVAILABLE_MODELS = {
-    # Original models
     "ToriiGate v0.3": "Minthy/ToriiGate-v0.3",
     "ToriiGate v0.4-7B": "Minthy/ToriiGate-v0.4-7B",
-    
-    # EXL2 models (point to local paths)
     "ToriiGate v0.4-7B-exl2-8bpw": "./models/ToriiGate-v0.4-7B-exl2-8bpw",
     "ToriiGate v0.4-7B-exl2-6bpw": "./models/ToriiGate-v0.4-7B-exl2-6bpw",
     "ToriiGate v0.4-7B-exl2-4bpw": "./models/ToriiGate-v0.4-7B-exl2-4bpw"
@@ -28,98 +26,114 @@ AVAILABLE_MODELS = {
 
 class ImageProcessor:
     def __init__(self, model_name="ToriiGate v0.3", quantization_mode=None):
+        self.model = None
+        self.processor = None
         self.model_name = AVAILABLE_MODELS[model_name]
         self.model_version = model_name
         self.device = "cuda:0" if torch.cuda.is_available() else "cpu"
         self.is_exl2 = "exl2" in model_name.lower()
-        print(f"\nLoading {model_name}...")
+        self.quantization_mode = quantization_mode
         
+        print(f"\nLoading {model_name}...")
         try:
             if self.is_exl2:
                 self._load_exl2_model()
             else:
-                # Configure quantization for non-ExLlama models
-                if quantization_mode == "4bit":
-                    print("Configuring 4-bit quantization...")
-                    quantization_config = BitsAndBytesConfig(
-                        load_in_4bit=True,
-                        bnb_4bit_quant_type="nf4",
-                        bnb_4bit_use_double_quant=True,
-                        bnb_4bit_compute_dtype=torch.bfloat16
-                    )
-                elif quantization_mode == "8bit":
-                    print("Configuring 8-bit quantization...")
-                    quantization_config = BitsAndBytesConfig(
-                        load_in_8bit=True,
-                    )
-                else:
-                    quantization_config = None
-
-                print("Loading processor...")
-                if "v0.4" in model_name:
-                    from transformers import Qwen2VLProcessor
-                    self.processor = Qwen2VLProcessor.from_pretrained(
-                        self.model_name,
-                        min_pixels=256*28*28,
-                        max_pixels=512*28*28,
-                        padding_side="right"
-                    )
-                    
-                    print("Loading Qwen2VL model...")
-                    from transformers import Qwen2VLForConditionalGeneration
-                    self.model = Qwen2VLForConditionalGeneration.from_pretrained(
-                        self.model_name,
-                        torch_dtype=torch.bfloat16,
-                        device_map="auto",
-                        quantization_config=quantization_config,
-                        attn_implementation="sdpa"
-                    )
-                else:
-                    self.processor = AutoProcessor.from_pretrained(self.model_name)
-                    
-                    if quantization_config:
-                        print(f"Loading model in {quantization_mode} mode...")
-                        self.model = AutoModelForVision2Seq.from_pretrained(
-                            self.model_name,
-                            device_map="auto",
-                            quantization_config=quantization_config,
-                        )
-                    else:
-                        print("Loading model in default mode...")
-                        self.model = AutoModelForVision2Seq.from_pretrained(
-                            self.model_name,
-                            torch_dtype=torch.bfloat16,
-                        ).to(self.device)
-                
-            print("Model loaded successfully!")
+                self._load_standard_model()
             
+            if self.model is None:
+                raise RuntimeError("Model initialization failed")
+
         except Exception as e:
             print(f"\nError during model initialization: {str(e)}")
+            self.cleanup()
             raise
+
+    def _load_standard_model(self):
+        if self.quantization_mode == "4bit":
+            quantization_config = BitsAndBytesConfig(
+                load_in_4bit=True,
+                bnb_4bit_quant_type="nf4",
+                bnb_4bit_use_double_quant=True,
+                bnb_4bit_compute_dtype=torch.bfloat16
+            )
+        elif self.quantization_mode == "8bit":
+            quantization_config = BitsAndBytesConfig(load_in_8bit=True)
+        else:
+            quantization_config = None
+
+        if "v0.4" in self.model_version:
+            from transformers import Qwen2VLProcessor, Qwen2VLForConditionalGeneration
+            self.processor = Qwen2VLProcessor.from_pretrained(
+                self.model_name,
+                min_pixels=256*28*28,
+                max_pixels=512*28*28,
+                padding_side="right"
+            )
+            self.model = Qwen2VLForConditionalGeneration.from_pretrained(
+                self.model_name,
+                torch_dtype=torch.bfloat16,
+                device_map="auto",
+                quantization_config=quantization_config,
+                attn_implementation="sdpa"
+            )
+        else:
+            self.processor = AutoProcessor.from_pretrained(self.model_name)
+            self.model = AutoModelForVision2Seq.from_pretrained(
+                self.model_name,
+                torch_dtype=torch.bfloat16,
+                device_map="auto" if quantization_config else None,
+                quantization_config=quantization_config
+            ).to(self.device)
 
     def _load_exl2_model(self):
         print(f"Loading ExLlama v2 model: {self.model_name}")
         self.config = ExLlamaV2Config(self.model_name)
-        self.config.max_seq_len = 16384
         
-        print("Loading vision tower...")
+        # Increased sequence length for batch processing
+        self.config.max_seq_len = 65536  # Allows larger batches
+        
+        # Initialize vision tower
         self.vision_tower = ExLlamaV2VisionTower(self.config)
         self.vision_tower.load()
         
-        print("Loading main model...")
+        # Initialize model with batch-friendly cache
         self.model = ExLlamaV2(self.config)
-        self.cache = ExLlamaV2Cache(self.model, lazy=True)
+        self.cache = ExLlamaV2Cache(
+            self.model,
+            lazy=True,
+            max_seq_len=self.config.max_seq_len
+        )
         self.model.load_autosplit(self.cache)
         
-        print("Loading tokenizer...")
+        # Initialize tokenizer and generator
         self.tokenizer = ExLlamaV2Tokenizer(self.config)
-        
-        print("Initializing generator...")
         self.generator = ExLlamaV2DynamicGenerator(
             model=self.model,
             cache=self.cache,
             tokenizer=self.tokenizer,
         )
+        
+    def _auto_tune_batch_size(self, folder_path, initial_batch_size=8):
+        """Automatically find optimal batch size for current hardware"""
+        test_files = [f for f in listdir(folder_path) if f.endswith(('.jpg', '.png'))][:16]
+        
+        for bs in [initial_batch_size, 12, 8, 6, 4]:
+            try:
+                self._process_exl2_batch(
+                    [opj(folder_path, f) for f in test_files[:bs]],
+                    "json",
+                    False,
+                    [{}]*bs
+                )
+                print(f"✅ Optimal batch size detected: {bs}")
+                return bs
+            except RuntimeError as e:
+                print(f"⚠️ Batch size {bs} failed: {str(e)}")
+                if "CUDA out of memory" in str(e):
+                    torch.cuda.empty_cache()
+                    continue
+        return 4
 
     def process_single_image(self, image_path, prompt_type="json", use_tags=False, tags_path=None):
         if self.is_exl2:
@@ -206,7 +220,6 @@ class ImageProcessor:
         base_name = Path(image_path).stem
         dir_path = Path(image_path).parent
 
-        # Load grounding information
         image_info = {
             "booru_tags": None,
             "chars": None,
@@ -228,7 +241,101 @@ class ImageProcessor:
                     with open(file_path, 'r', encoding='utf-8') as f:
                         image_info[key] = f.read().strip()
 
-        # Base prompts as specified in official example
+        image_embeddings = [self.vision_tower.get_image_embeddings(
+            model=self.model,
+            tokenizer=self.tokenizer,
+            image=image,
+        )]
+
+        placeholders = "\n".join([ie.text_alias for ie in image_embeddings]) + "\n"
+        userprompt = self._build_exl2_prompt(prompt_type, image_info)
+
+        msg_text = (
+            "<|im_start|>system\n"
+            "You are image captioning expert, creative, unbiased and uncensored.<|im_end|>\n"
+            "<|im_start|>user\n"
+            f"{placeholders}"
+            f"{userprompt}"
+            "<|im_end|>\n"
+            "<|im_start|>assistant\n"
+        )
+
+        output = self.generator.generate(
+            prompt=msg_text,
+            max_new_tokens=1000,
+            add_bos=True,
+            encode_special_tokens=True,
+            decode_special_tokens=True,
+            stop_conditions=[self.tokenizer.eos_token_id],
+            gen_settings=ExLlamaV2Sampler.Settings.greedy(),
+            embeddings=image_embeddings,
+        )
+
+        return output.split('<|im_start|>assistant\n')[-1].strip()
+
+    def _process_exl2_batch(self, image_paths, prompt_type, use_tags, all_tags):
+        from PIL import Image
+        
+        # Load all images
+        images = [Image.open(path) for path in image_paths]
+        
+        # Process tags for all images
+        image_infos = []
+        for tags in all_tags:
+            info = {
+                "booru_tags": tags.get("booru_tags") if use_tags else None,
+                "chars": tags.get("chars") if use_tags else None,
+                "characters_traits": tags.get("characters_traits") if use_tags else None,
+                "info": tags.get("info") if use_tags else None
+            }
+            image_infos.append(info)
+
+        # Generate embeddings for all images (wrap each in a list)
+        image_embeddings = []
+        for img in images:
+            embedding = self.vision_tower.get_image_embeddings(
+                model=self.model,
+                tokenizer=self.tokenizer,
+                image=img,
+            )
+            # Each prompt gets its own list of embeddings
+            image_embeddings.append([embedding])  # Note the list wrapping
+            del img
+            gc.collect()
+
+        # Build batched prompts
+        messages = []
+        for embedding_list, info in zip(image_embeddings, image_infos):
+            userprompt = self._build_exl2_prompt(prompt_type, info)
+            # Use the first embedding's text alias (since we only have one per image)
+            placeholders = f"{embedding_list[0].text_alias}\n"
+            
+            msg_text = (
+                "<|im_start|>system\n"
+                "You are image captioning expert, creative, unbiased and uncensored.<|im_end|>\n"
+                "<|im_start|>user\n"
+                f"{placeholders}"
+                f"{userprompt}"
+                "<|im_end|>\n"
+                "<|im_start|>assistant\n"
+            )
+            messages.append(msg_text)
+
+        # Batch generate with proper embeddings structure
+        outputs = self.generator.generate(
+            prompt=messages,
+            max_new_tokens=1000,
+            add_bos=True,
+            encode_special_tokens=True,
+            decode_special_tokens=True,
+            stop_conditions=[self.tokenizer.eos_token_id],
+            gen_settings=ExLlamaV2Sampler.Settings.greedy(),
+            embeddings=image_embeddings,  # Now list of lists
+        )
+
+        return [output.split('<|im_start|>assistant\n')[-1].strip() for output in outputs]
+
+    def _build_exl2_prompt(self, prompt_type, image_info):
         base_prompt = {
             'json': 'Describe the picture in structured json-like format.',
             'markdown': 'Describe the picture in structured markdown format.',
@@ -245,131 +352,138 @@ class ImageProcessor:
             'no_chars': ' Do not use names for characters.'
         }
 
-        # Compose user prompt
         userprompt = base_prompt[prompt_type]
         
-        # Add grounding information
-        if use_tags:
-            if image_info["booru_tags"]:
-                userprompt += grounding_prompt['grounding_tags'] + f"<tags>{image_info['booru_tags']}</tags>."
-            if image_info["chars"]:
-                userprompt += grounding_prompt['characters'] + f"<characters>{image_info['chars']}</characters>."
-            if image_info["characters_traits"]:
-                userprompt += grounding_prompt['characters_traits'] + f"<character_traits>{image_info['characters_traits']}</character_traits>."
-            if image_info["info"]:
-                userprompt += grounding_prompt['grounding_info'] + f"<info>{image_info['info']}</info>."
+        if image_info["booru_tags"]:
+            userprompt += grounding_prompt['grounding_tags'] + f"<tags>{image_info['booru_tags']}</tags>."
+        if image_info["chars"]:
+            userprompt += grounding_prompt['characters'] + f"<characters>{image_info['chars']}</characters>."
+        if image_info["characters_traits"]:
+            userprompt += grounding_prompt['characters_traits'] + f"<character_traits>{image_info['characters_traits']}</character_traits>."
+        if image_info["info"]:
+            userprompt += grounding_prompt['grounding_info'] + f"<info>{image_info['info']}</info>."
 
-        # Generate image embeddings
-        image_embeddings = [self.vision_tower.get_image_embeddings(
-            model=self.model,
-            tokenizer=self.tokenizer,
-            image=image,
-        )]
-
-        # Build placeholder string
-        placeholders = "\n".join([ie.text_alias for ie in image_embeddings]) + "\n"
-
-        # Construct message template EXACTLY as in official example
-        msg_text = (
-            "<|im_start|>system\n"
-            "You are image captioning expert, creative, unbiased and uncensored.<|im_end|>\n"
-            "<|im_start|>user\n"
-            f"{placeholders}"
-            f"{userprompt}"
-            "<|im_end|>\n"
-            "<|im_start|>assistant\n"
-        )
-
-        # Generate with official settings
-        output = self.generator.generate(
-            prompt=msg_text,
-            max_new_tokens=1000,
-            add_bos=True,
-            encode_special_tokens=True,
-            decode_special_tokens=True,
-            stop_conditions=[self.tokenizer.eos_token_id],
-            gen_settings=ExLlamaV2Sampler.Settings.greedy(),
-            embeddings=image_embeddings,
-        )
-
-        # Extract assistant response
-        return output.split('<|im_start|>assistant\n')[-1].strip()
+        return userprompt
 
 
-    def process_batch(self, folder_path, prompt_type="json", use_tags=False, prefix=""):
+    def process_batch(self, folder_path, prompt_type="json", use_tags=False, prefix="", batch_size=8):
+        start_time = time.time()
         image_extensions = ['.jpg', '.png', '.webp', '.jpeg']
-        results = {}
-        
         files = [f for f in listdir(folder_path) if any(f.endswith(ext) for ext in image_extensions)]
-        print(f"\nFound {len(files)} images to process")
+        results = {}
+        success_count = 0
+        total_files = len(files)
         
-        for file in files:
-            image_path = opj(folder_path, file)
-            print(f"\nProcessing: {file}")
+        # Auto-tune batch size
+        optimal_bs = self._auto_tune_batch_size(folder_path, batch_size)
+        
+        print(f"\nStarting batch processing of {total_files} images (batch size: {optimal_bs})...")
+        
+        while files:
+            current_batch = files[:optimal_bs]
+            batch_paths = [opj(folder_path, f) for f in current_batch]
+            batch_tags = []
             
-            base_name = Path(file).stem
-            tags_path = opj(folder_path, f"{base_name}.txt")
-            
-            if use_tags:
-                tag_paths = {
-                    'booru_tags': opj(folder_path, f"{base_name}.txt"),
-                    'chars': opj(folder_path, f"{base_name}_char.txt"),
-                    'characters_traits': opj(folder_path, f"{base_name}_char_traits.txt"),
-                    'info': opj(folder_path, f"{base_name}_info.txt")
-                }
-                
+            # Collect metadata for current batch
+            for file in current_batch:
+                base_name = Path(file).stem
                 tags = {}
-                for key, path in tag_paths.items():
-                    if Path(path).exists():
-                        try:
+                if use_tags:
+                    tag_data = {
+                        'booru_tags': f"{base_name}.txt",
+                        'chars': f"{base_name}_char.txt",
+                        'characters_traits': f"{base_name}_char_traits.txt",
+                        'info': f"{base_name}_info.txt"
+                    }
+                    for key, filename in tag_data.items():
+                        path = opj(folder_path, filename)
+                        if Path(path).exists():
                             with open(path, 'r', encoding='utf-8') as f:
                                 tags[key] = f.read().strip()
-                        except Exception as e:
-                            print(f"Error reading {key} file: {e}")
-                            tags[key] = None
-                    else:
-                        tags[key] = None
-            else:
-                tags = None
+                batch_tags.append(tags)
             
             try:
+                # Process current batch
                 if self.is_exl2:
-                    caption = self._process_exl2_image(image_path, prompt_type, use_tags, tags)
-                else:
-                    caption = self.process_single_image(
-                        image_path, 
-                        prompt_type, 
-                        use_tags and tags is not None,
-                        tags_path if tags is not None else None
+                    captions = self._process_exl2_batch(
+                        batch_paths, 
+                        prompt_type,
+                        use_tags,
+                        batch_tags
                     )
+                else:
+                    captions = [
+                        self.process_single_image(path, prompt_type, use_tags)
+                        for path in batch_paths
+                    ]
+
+                # Save successful results
+                for file, caption in zip(current_batch, captions):
+                    if "Error:" not in caption:
+                        success_count += 1
+                        if prefix:
+                            caption = f"{prefix}\n{caption}"
+                        results[file] = caption
+                        
+                        output_path = opj(folder_path, f"{Path(file).stem}_caption.txt")
+                        with open(output_path, 'w', encoding='utf-8', errors='ignore') as f:
+                            f.write(caption)
+                        print(f"✓ Saved caption for: {file}")
+                    else:
+                        print(f"✗ Failed caption for: {file}")
+
+                # Remove processed files from queue
+                files = files[optimal_bs:]
                 
-                if prefix:
-                    caption = f"{prefix}\n{caption}"
-                    
-                results[file] = caption
+                # Dynamic batch size adjustment
+                vram_usage = torch.cuda.memory_allocated()/torch.cuda.max_memory_allocated()
+                if vram_usage < 0.8:
+                    optimal_bs = min(optimal_bs * 2, 16)
+                    print(f"↻ Increasing batch size to {optimal_bs} (VRAM usage: {vram_usage*100:.1f}%)")
                 
-                output_path = opj(folder_path, f"{base_name}_caption.txt")
-                with open(output_path, 'w', encoding='utf-8', errors='ignore') as f:
-                    f.write(caption)
-                print(f"✓ Saved caption to: {Path(output_path).name}")
-                    
+                # Show progress
+                elapsed = time.time() - start_time
+                print(f"  ▸ Processed {success_count}/{total_files} images (~{elapsed:.1f}s elapsed)")
+
+            except RuntimeError as e:
+                if "pages" in str(e) or "cache" in str(e).lower():
+                    optimal_bs = max(1, optimal_bs // 2)
+                    print(f"⚠️ Reducing batch size to {optimal_bs}")
+                else:
+                    print(f"! Batch processing failed: {str(e)}")
+                    files = files[1:]
+            
             except Exception as e:
-                error_msg = f"Error processing {file}: {str(e)}"
-                print(f"✗ {error_msg}")
-                results[file] = f"Error: {str(e)}"
-                continue
+                print(f"! Critical error: {str(e)}")
+                break
                 
+            finally:
+                if torch.cuda.is_available():
+                    torch.cuda.empty_cache()
+
+        # Final report
+        elapsed = time.time() - start_time
+        print(f"\n{'✅ Success!' if success_count == total_files else '⚠️ Completed with issues'}")
+        print(f"Processed {success_count}/{total_files} images in {elapsed:.2f} seconds")
+        print(f"Average speed: {elapsed/success_count if success_count > 0 else 0:.2f}s per image\n")
+        
         return results
     
-    def __del__(self):
-        """Cleanup when object is deleted"""
-        self.cleanup()
-
     def cleanup(self):
-        """Explicitly cleanup resources"""
-        if hasattr(self, 'model'):
-            del self.model
-        if hasattr(self, 'processor'):
-            del self.processor
+        """Safe cleanup preserving core attributes"""
+        if hasattr(self, 'cache'):
+            del self.cache
+        if hasattr(self, 'generator'):
+            del self.generator
+        if hasattr(self, 'tokenizer'):
+            del self.tokenizer
+        if hasattr(self, 'vision_tower'):
+            del self.vision_tower
+            
         if torch.cuda.is_available():
             torch.cuda.empty_cache()
+            gc.collect()
+
+    def __del__(self):
+        """Destructor that preserves model reference"""
+        self.cleanup()

@@ -1,6 +1,6 @@
 from PySide6.QtWidgets import (QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, QComboBox,
                               QPushButton, QTextEdit, QFileDialog, QRadioButton, QApplication,
-                              QButtonGroup, QCheckBox, QProgressBar, QLabel, QLineEdit)
+                              QButtonGroup, QCheckBox, QProgressBar, QLabel, QLineEdit, QSpinBox)
 from PySide6.QtCore import Qt, Signal, QThread
 import torch
 from processor import ImageProcessor
@@ -115,6 +115,16 @@ class MainWindow(QMainWindow):
         file_layout.addWidget(self.path_label)
         file_layout.addWidget(self.select_button)
         layout.addLayout(file_layout)
+        
+        #Batch size
+        batch_layout = QHBoxLayout()
+        self.batch_size_label = QLabel("Batch Size:")
+        self.batch_size = QSpinBox()
+        self.batch_size.setRange(1, 8)
+        self.batch_size.setValue(4)
+        batch_layout.addWidget(self.batch_size_label)
+        batch_layout.addWidget(self.batch_size)
+        layout.addLayout(batch_layout)
         
         # Progress bar
         self.progress_bar = QProgressBar()
