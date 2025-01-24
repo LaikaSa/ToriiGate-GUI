@@ -84,7 +84,7 @@ class MainWindow(QMainWindow):
         prompt_layout = QHBoxLayout()
         self.prompt_group = QButtonGroup()
         self.json_prompt = QRadioButton("JSON Format")
-        self.detailed_prompt = QRadioButton("Detailed Description")
+        self.detailed_prompt = QRadioButton("Long Description")
         self.brief_prompt = QRadioButton("Brief Description")
         self.prompt_group.addButton(self.json_prompt)
         self.prompt_group.addButton(self.detailed_prompt)
@@ -187,7 +187,7 @@ class MainWindow(QMainWindow):
         if self.json_prompt.isChecked():
             return "json"
         elif self.detailed_prompt.isChecked():
-            return "detailed"
+            return "long"
         return "brief"
         
     def process_images(self):

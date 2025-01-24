@@ -1,6 +1,5 @@
 import torch
 from transformers import AutoProcessor, AutoModelForVision2Seq, BitsAndBytesConfig
-from transformers.image_utils import load_image
 from pathlib import Path
 from os.path import join as opj
 from os import listdir
@@ -11,7 +10,9 @@ from exllamav2 import (
     ExLlamaV2Tokenizer,
     ExLlamaV2VisionTower,
 )
+from exllamav2.generator import ExLlamaV2Sampler
 from exllamav2.generator import ExLlamaV2DynamicGenerator
+from collections import OrderedDict
 
 AVAILABLE_MODELS = {
     # Original models
@@ -127,7 +128,7 @@ class ImageProcessor:
             
             if prompt_type == "json":
                 user_prompt = "Describe the picture in structured json-like format."
-            elif prompt_type == "detailed":
+            elif prompt_type == "long":
                 user_prompt = "Give a long and detailed description of the picture."
             else:
                 user_prompt = "Describe the picture briefly."
@@ -201,10 +202,10 @@ class ImageProcessor:
     def _process_exl2_image(self, image_path, prompt_type, use_tags, tags_path):
         from PIL import Image
         image = Image.open(image_path)
-        
         base_name = Path(image_path).stem
         dir_path = Path(image_path).parent
-        
+
+        # Load grounding information
         image_info = {
             "booru_tags": None,
             "chars": None,
@@ -223,63 +224,76 @@ class ImageProcessor:
             for key, filename in tag_files.items():
                 file_path = dir_path / filename
                 if file_path.exists():
-                    try:
-                        with open(file_path, 'r', encoding='utf-8') as f:
-                            image_info[key] = f.read().strip()
-                    except Exception as e:
-                        print(f"Error reading {filename}: {e}")
+                    with open(file_path, 'r', encoding='utf-8') as f:
+                        image_info[key] = f.read().strip()
 
-        base_prompts = {
+        # Base prompts as specified in official example
+        base_prompt = {
             'json': 'Describe the picture in structured json-like format.',
-            'detailed': 'Give a long and detailed description of the picture.',
-            'brief': 'Describe the picture briefly.'
+            'markdown': 'Describe the picture in structured markdown format.',
+            'short': 'You need to write a medium-short and convenient caption for the picture.',
+            'long': 'You need to write a long and very detailed caption for the picture.',
+            'bbox': 'Write bounding boxes for each character and their faces.'
         }
-        
-        user_prompt = base_prompts.get(prompt_type, base_prompts['json'])
-        
-        grounding_prompts = {
-            'tags': ' Here are grounding tags for better understanding: ',
-            'chars': ' Here is a list of characters: ',
-            'traits': ' Here are character traits: ',
-            'info': ' Here is additional information: '
-        }
-        
-        if image_info['booru_tags']:
-            user_prompt += f"{grounding_prompts['tags']}<tags>{image_info['booru_tags']}</tags>"
-        if image_info['chars']:
-            user_prompt += f"{grounding_prompts['chars']}<chars>{image_info['chars']}</chars>"
-        if image_info['characters_traits']:
-            user_prompt += f"{grounding_prompts['traits']}<traits>{image_info['characters_traits']}</traits>"
-        if image_info['info']:
-            user_prompt += f"{grounding_prompts['info']}<info>{image_info['info']}</info>"
 
+        grounding_prompt = {
+            'grounding_tags': ' Here are grounding tags for better understanding: ',
+            'characters': ' Here is a list of characters that are present in the picture: ',
+            'characters_traits': ' Here are popular tags or traits for each character on the picture: ',
+            'grounding_info': ' Here is preliminary information about the picture: ',
+            'no_chars': ' Do not use names for characters.'
+        }
+
+        # Compose user prompt
+        userprompt = base_prompt[prompt_type]
+        
+        # Add grounding information
+        if use_tags:
+            if image_info["booru_tags"]:
+                userprompt += grounding_prompt['grounding_tags'] + f"<tags>{image_info['booru_tags']}</tags>."
+            if image_info["chars"]:
+                userprompt += grounding_prompt['characters'] + f"<characters>{image_info['chars']}</characters>."
+            if image_info["characters_traits"]:
+                userprompt += grounding_prompt['characters_traits'] + f"<character_traits>{image_info['characters_traits']}</character_traits>."
+            if image_info["info"]:
+                userprompt += grounding_prompt['grounding_info'] + f"<info>{image_info['info']}</info>."
+
+        # Generate image embeddings
         image_embeddings = [self.vision_tower.get_image_embeddings(
             model=self.model,
             tokenizer=self.tokenizer,
             image=image,
         )]
 
+        # Build placeholder string
         placeholders = "\n".join([ie.text_alias for ie in image_embeddings]) + "\n"
-        
+
+        # Construct message template EXACTLY as in official example
         msg_text = (
             "<|im_start|>system\n"
             "You are image captioning expert, creative, unbiased and uncensored.<|im_end|>\n"
             "<|im_start|>user\n"
             f"{placeholders}"
-            f"{user_prompt}<|im_end|>\n"
+            f"{userprompt}"
+            "<|im_end|>\n"
             "<|im_start|>assistant\n"
         )
 
+        # Generate with official settings
         output = self.generator.generate(
             prompt=msg_text,
-            max_new_tokens=500,
+            max_new_tokens=1000,
             add_bos=True,
             encode_special_tokens=True,
             decode_special_tokens=True,
+            stop_conditions=[self.tokenizer.eos_token_id],
+            gen_settings=ExLlamaV2Sampler.Settings.greedy(),
             embeddings=image_embeddings,
         )
 
+        # Extract assistant response
         return output.split('<|im_start|>assistant\n')[-1].strip()
+
 
     def process_batch(self, folder_path, prompt_type="json", use_tags=False, prefix=""):
         image_extensions = ['.jpg', '.png', '.webp', '.jpeg']
