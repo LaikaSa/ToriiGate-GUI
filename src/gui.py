@@ -188,7 +188,7 @@ class MainWindow(QMainWindow):
             return "json"
         elif self.detailed_prompt.isChecked():
             return "long"
-        return "brief"
+        return "short"
         
     def process_images(self):
         path = self.path_label.text()
